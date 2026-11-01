@@ -23,13 +23,9 @@ MEMBER_DATA_TABLE_NAME = os.environ["MEMBER_DATA_TABLE_NAME"]
 KEYS_TABLE_NAME = os.environ["KEYS_TABLE_NAME"]
 LODGEMASTER_BASE_URL = os.environ["LODGEMASTER_BASE_URL"]
 
-# Names of the session-cookie items this function reads from
-# KEYS_TABLE_NAME. Refreshed hourly, out-of-band, by the
-# lodge104-lodgemaster-scrapper function (a separate stack) logging into
-# the LodgeMaster portal. Not secrets themselves -- the cookie *values*
-# stored under these item names are -- so they are safe to keep as code
-# constants rather than parameters.
-COOKIE_ITEM_NAMES = ("XSRF-TOKEN", "ai_session", "OA.LM.Lodge.Auth", "ai_user")
+# Name of the one item in KEYS_TABLE_NAME whose value also needs to be sent
+# as the X-Xsrf-Token header (in addition to the Cookie header below).
+XSRF_TOKEN_ITEM_NAME = "XSRF-TOKEN"
 
 # Path and query string for the LodgeMaster MemberGrid OData endpoint,
 # appended to LODGEMASTER_BASE_URL. Preserved byte-for-byte from the
@@ -83,10 +79,20 @@ def _build_lodgemaster_headers():
     """Builds the Cookie/X-Xsrf-Token headers from the session cookies
     lodge104-lodgemaster-scrapper maintains in KEYS_TABLE_NAME.
 
-    Cached per execution environment: a cold start reads all four items
-    once; later warm invocations reuse the result. Because the cache is
-    only cleared by a fresh cold start, a cookie rotation is not picked up
-    by an already-warm environment until it is recycled.
+    Forwards every item in the table as a cookie, rather than a fixed
+    allow-list of names: the portal's OpenID Connect identity-server login
+    flow issues several cookies that must all be present together for the
+    session to validate (e.g. OA.Portal.Auth plus its OA.Portal.AuthC1/C2
+    chunks, and an .AspNetCore.Antiforgery.* cookie whose name suffix can
+    change per deployment), so a hardcoded subset silently breaks whenever
+    that set changes upstream. lodge104-lodgemaster-scrapper applies its
+    own COOKIE_NAMES allow-list (if any) before writing to this table, so
+    there's no need to filter again here.
+
+    Cached per execution environment: a cold start scans the table once;
+    later warm invocations reuse the result. Because the cache is only
+    cleared by a fresh cold start, a cookie rotation is not picked up by an
+    already-warm environment until it is recycled.
     """
     global _cached_lodgemaster_headers
     if _cached_lodgemaster_headers is not None:
@@ -94,21 +100,24 @@ def _build_lodgemaster_headers():
 
     cookie_pairs = []
     xsrf_token_value = None
-    for item_name in COOKIE_ITEM_NAMES:
-        response = _dynamodb_client.get_item(
-            TableName=KEYS_TABLE_NAME,
-            Key={"name": {"S": item_name}},
+    paginator = _dynamodb_client.get_paginator("scan")
+    for page in paginator.paginate(TableName=KEYS_TABLE_NAME):
+        for item in page.get("Items", []):
+            name = item["name"]["S"]
+            value = item["value"]["S"]
+            cookie_pairs.append(f"{name}={value}")
+            if name == XSRF_TOKEN_ITEM_NAME:
+                xsrf_token_value = value
+
+    if not cookie_pairs:
+        raise RuntimeError(
+            f"{KEYS_TABLE_NAME} is empty; has lodge104-lodgemaster-scrapper run yet?"
         )
-        item = response.get("Item")
-        if item is None:
-            raise RuntimeError(
-                f"'{item_name}' is missing from {KEYS_TABLE_NAME}; has "
-                "lodge104-lodgemaster-scrapper run recently?"
-            )
-        value = item["value"]["S"]
-        cookie_pairs.append(f"{item_name}={value}")
-        if item_name == "XSRF-TOKEN":
-            xsrf_token_value = value
+    if xsrf_token_value is None:
+        raise RuntimeError(
+            f"'{XSRF_TOKEN_ITEM_NAME}' is missing from {KEYS_TABLE_NAME}; has "
+            "lodge104-lodgemaster-scrapper run recently?"
+        )
 
     _cached_lodgemaster_headers = {
         "Cookie": "; ".join(cookie_pairs) + ";",

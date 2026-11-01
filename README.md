@@ -46,24 +46,36 @@ subscribers current.
 
 Unlike `lodge104-mailerlite-sync` (which authenticates with a single SSM
 `SecureString` bearer token), this function authenticates to the
-LodgeMaster portal using four session cookies -- `XSRF-TOKEN`,
-`ai_session`, `OA.LM.Lodge.Auth`, and `ai_user` -- stored as items in the
+LodgeMaster portal using session cookies stored as items in the
 `lodge104-keys` DynamoDB table. That table is **not** owned by this stack:
 it belongs to the `lodge104-lodgemaster-scrapper` function/stack, which
-logs into the portal and refreshes those four items hourly.
+logs into the portal (via its OpenID Connect identity server at
+`id.oa-scouting.org`) and refreshes every item hourly.
+
+`lambda_function.py` forwards **every** item in `lodge104-keys` as a
+cookie, rather than a fixed allow-list of names. The portal's OIDC login
+flow issues several cookies that must all be present together for a
+session to validate -- e.g. `OA.Portal.Auth` plus its chunked
+`OA.Portal.AuthC1`/`OA.Portal.AuthC2` values, and an
+`.AspNetCore.Antiforgery.*` cookie whose name suffix can change per
+deployment -- so a hardcoded subset silently breaks whenever that set
+changes upstream (sending an incomplete cookie jar manifests as an
+infinite redirect loop to the identity server, not a clean auth failure).
+`XSRF-TOKEN`'s value is additionally sent as the `X-Xsrf-Token` header.
 
 `MemberDataRole`'s `ReadLodgeMasterSessionCookies` policy grants
-`dynamodb:GetItem` on that table scoped, via a `dynamodb:LeadingKeys`
-condition, to exactly those four item names -- it cannot read any other
-item in `lodge104-keys`. The cookie values themselves are fetched once per
-execution environment (cached across warm invocations) and are never
-logged; only the four item *names* (which are not secrets) appear in code
-or CloudWatch Logs.
+`dynamodb:Scan` on the table, scoped to that table's ARN; `dynamodb:Scan`
+has no per-item equivalent of a `dynamodb:LeadingKeys` condition, so this
+is broader than the previous `GetItem`-per-name approach, but
+`lodge104-keys` holds nothing but these session cookies. The cookie values
+are fetched once per execution environment (cached across warm
+invocations) and are never logged; only item *names* (which are not
+secrets) appear in code or CloudWatch Logs.
 
-If `lodge104-lodgemaster-scrapper` stops running, or any of the four items
-go missing, `lambda_function.py` raises immediately with a message naming
-the missing item -- which should also trip `MemberDataErrorAlarm` (see
-below).
+If `lodge104-lodgemaster-scrapper` stops running, if the table is empty,
+or if `XSRF-TOKEN` specifically is missing, `lambda_function.py` raises
+immediately with a message naming the problem -- which should also trip
+`MemberDataErrorAlarm` (see below).
 
 ## Monitoring & alerts
 
