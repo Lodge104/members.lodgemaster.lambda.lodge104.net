@@ -1,0 +1,20 @@
+version: 0.2
+phases:
+  install:
+    runtime-versions:
+      python: 3.12
+    commands:
+      - pip install --upgrade pip
+      - pip install --upgrade awscli aws-sam-cli
+  build:
+    commands:
+      - sam build --template "${SAM_TEMPLATE}"
+      - . ./assume-role.sh ${PROD_PIPELINE_EXECUTION_ROLE} prod-package
+      - sam package --s3-bucket ${PROD_ARTIFACT_BUCKET}
+                    --region ${PROD_REGION}
+                    --output-template-file packaged-prod.yaml
+artifacts:
+  files:
+    - packaged-prod.yaml
+    - assume-role.sh
+    - pipeline/*

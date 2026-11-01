@@ -1,0 +1,2 @@
+ignore_checks:
+  - W1028 # false positive: CreateConnection flips False via --parameter-overrides at deploy time

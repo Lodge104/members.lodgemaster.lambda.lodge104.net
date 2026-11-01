@@ -1,0 +1,321 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  lodge104-memberdata
+  Pulls the Lodge 104 membership roster from the LodgeMaster OData API on an
+  hourly schedule and writes it into the lodge104-member_data DynamoDB
+  table. That table (and its stream) is the first stage of the pipeline
+  consumed by the separate lodge104-mailerlite-sync stack
+  (https://github.com/Lodge104/sync.mailerlite.lambda.lodge104.net).
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
+Parameters:
+  MemberDataTableName:
+    Type: String
+    Default: lodge104-member_data
+    Description: >
+      DynamoDB table that stores the Lodge 104 membership roster. Owned by
+      this stack. Its stream (NEW_AND_OLD_IMAGES) is consumed downstream by
+      the separate lodge104-mailerlite-sync stack via an EventBridge Pipe
+      that stack manages outside of this one.
+
+  KeysTableName:
+    Type: String
+    Default: lodge104-keys
+    Description: >
+      Name of the DynamoDB table holding short-lived LodgeMaster portal
+      session cookies (XSRF-TOKEN, ai_session, OA.LM.Lodge.Auth, ai_user),
+      refreshed hourly by the separately-owned lodge104-lodgemaster-scrapper
+      function. Referenced here by name only -- this stack never owns or
+      creates it -- and MemberDataRole's policy below grants read access
+      scoped to exactly those four items.
+
+  LodgeMasterBaseUrl:
+    Type: String
+    Default: "https://lodgemaster-client.oa-bsa.org"
+    Description: Base URL of the LodgeMaster portal queried for member data.
+
+  ScheduleExpression:
+    Type: String
+    Default: rate(1 hour)
+    Description: >
+      How often MemberDataFunction runs. This is a dedicated EventBridge
+      rule owned by this stack, deliberately separate from the pre-existing
+      "Hourly" rule shared with the unrelated lodge104-lodgemaster-scrapper
+      function -- see README.md for the one-time step that removes this
+      function as a target of that shared rule before the first deploy.
+
+  AlarmTopicArn:
+    Type: String
+    Description: >
+      ARN of the SNS topic that receives operational alerts for this
+      function. Defaults to the existing "lodge104-lambda" topic, which is
+      shared with other Lodge 104 Lambda functions (including
+      lodge104-mailerlite-sync) and already has email, SMS, and Slack
+      subscribers. Because it is shared, it is referenced here by ARN
+      rather than owned/created by this stack.
+    Default: "arn:aws:sns:us-east-1:423971488961:lodge104-lambda"
+
+  ErrorAlarmThreshold:
+    Type: Number
+    Description: >
+      Number of Lambda invocation errors within the evaluation window
+      (ErrorAlarmPeriodSeconds x ErrorAlarmEvaluationPeriods) that triggers
+      the error alarm.
+    Default: 1
+
+  ErrorAlarmPeriodSeconds:
+    Type: Number
+    Description: >
+      Length, in seconds, of each evaluation period used for the alarm.
+      Defaults to this function's hourly invocation cadence.
+    Default: 3600
+
+  ErrorAlarmEvaluationPeriods:
+    Type: Number
+    Description: Number of consecutive periods evaluated by the alarm.
+    Default: 3
+
+  ErrorAlarmDatapointsToAlarm:
+    Type: Number
+    Description: Number of breaching datapoints, out of ErrorAlarmEvaluationPeriods, required to alarm.
+    Default: 2
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures: [x86_64]
+    MemorySize: 3008
+    Timeout: 900
+    EphemeralStorage:
+      Size: 512
+    Environment:
+      Variables:
+        MEMBER_DATA_TABLE_NAME: !Ref MemberDataTableName
+        KEYS_TABLE_NAME: !Ref KeysTableName
+        LODGEMASTER_BASE_URL: !Ref LodgeMasterBaseUrl
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # IAM execution role
+  # ---------------------------------------------------------------------------
+  MemberDataRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >
+          Keep the physical name/path so CloudFormation import matches the
+          existing role (created directly in the console in 2023) rather
+          than replacing it. The live role previously also carried
+          AWSLambdaInvocation-DynamoDB and AmazonDynamoDBFullAccess managed
+          policies; those are intentionally dropped here in favor of the
+          scoped inline policies below.
+        must:
+          - Grant only dynamodb:GetItem on KeysTableName, scoped via a dynamodb:LeadingKeys condition to the four cookie items the function actually reads.
+          - Grant only the DynamoDB write actions MemberDataFunction needs, scoped to MemberDataTable's own ARN.
+    Properties:
+      RoleName: lodge104-memberdata-role-94rpi1nc
+      Path: /service-role/
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Basic CloudWatch Logs access
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ReadLodgeMasterSessionCookies
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Scoped to exactly the four cookie items the function reads,
+              # via a LeadingKeys condition on the table's "name" hash key.
+              # The Null check guards against the ForAllValues vacuous-truth
+              # case (an empty/missing LeadingKeys context key would
+              # otherwise evaluate to true).
+              - Sid: ReadSessionCookieItems
+                Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${KeysTableName}"
+                Condition:
+                  "ForAllValues:StringEquals":
+                    "dynamodb:LeadingKeys":
+                      - "XSRF-TOKEN"
+                      - "ai_session"
+                      - "OA.LM.Lodge.Auth"
+                      - "ai_user"
+                  "Null":
+                    "dynamodb:LeadingKeys": "false"
+        - PolicyName: WriteMemberData
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Least-privilege: only the write actions the batch_writer
+              # call in lambda_function.py needs, scoped to this stack's
+              # own table.
+              - Sid: WriteMemberDataTable
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:BatchWriteItem
+                Resource: !GetAtt MemberDataTable.Arn
+
+  # ---------------------------------------------------------------------------
+  # DynamoDB table -- the first stage of the lodge104-mailerlite-sync pipeline.
+  # Pre-dates this stack (created in 2023) and is imported, not created fresh.
+  # ---------------------------------------------------------------------------
+  MemberDataTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >
+          Keep the physical name so CloudFormation import matches the
+          existing table. Its stream is the sole input to the separate
+          lodge104-mailerlite-sync stack's EventBridge Pipe (managed
+          outside this stack).
+        must:
+          - Retain on delete/replace; holds the entire Lodge 104 membership roster (~10k items).
+          - Keep DeletionProtectionEnabled true.
+          - Keep StreamSpecification NEW_AND_OLD_IMAGES; the downstream sync pipeline depends on OldImage for change comparisons.
+          - Keep the LastUpdatedDate-index GSI and BsaPersonId/DuesYear key schema; both pre-date this stack and other consumers may depend on them.
+    Properties:
+      TableName: !Ref MemberDataTableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: BsaPersonId
+          AttributeType: N
+        - AttributeName: DuesYear
+          AttributeType: N
+        - AttributeName: LastUpdatedDate
+          AttributeType: S
+      KeySchema:
+        - AttributeName: BsaPersonId
+          KeyType: HASH
+        - AttributeName: DuesYear
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: LastUpdatedDate-index
+          KeySchema:
+            - AttributeName: LastUpdatedDate
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      DeletionProtectionEnabled: true
+
+  # ---------------------------------------------------------------------------
+  # Lambda function
+  # ---------------------------------------------------------------------------
+  MemberDataFunction:
+    Type: AWS::Serverless::Function
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >
+          Keep the physical name so CloudFormation import matches the
+          existing function (created directly in the console in 2023).
+          Runtime is bumped from the live python3.10 to python3.12 (matching
+          the CodeBuild buildspecs' python toolchain) as part of this SAM
+          migration. EphemeralStorage is reduced from the live console
+          default of 3008 MB to the 512 MB service default since the
+          handler never writes to /tmp.
+        must:
+          - Keep Handler as lambda_function.lambda_handler to match the already-deployed code's module name.
+        mutability:
+          Runtime: free-to-tune
+          EphemeralStorage: free-to-tune
+    Properties:
+      FunctionName: lodge104-memberdata
+      Description: Uses the LodgeMaster API to get the entire member table.
+      Handler: lambda_function.lambda_handler
+      CodeUri: src/
+      Role: !GetAtt MemberDataRole.Arn
+      Events:
+        HourlySchedule:
+          Type: Schedule
+          Properties:
+            Name: lodge104-memberdata-hourly
+            Description: >
+              Dedicated hourly trigger for MemberDataFunction, owned by this
+              stack. Replaces this function's target on the shared "Hourly"
+              rule (see README.md for the one-time migration step).
+            Schedule: !Ref ScheduleExpression
+            Enabled: true
+
+  # ---------------------------------------------------------------------------
+  # CloudWatch alarm + SNS notification. New resource -- no alarm previously
+  # existed for this function.
+  # ---------------------------------------------------------------------------
+  MemberDataErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      AlarmName: "AWS/Lambda Errors FunctionName=lodge104-memberdata"
+      AlarmDescription: >
+        This alarm detects high error counts. The Errors metric includes the
+        exceptions thrown by the code as well as exceptions thrown by the
+        Lambda runtime. You can check the logs related to the function to
+        diagnose the issue.
+
+        This function refreshes the Lodge 104 membership roster in DynamoDB
+        on an hourly schedule. If this alarm has sounded, the roster (and
+        everything downstream of it, including lodge104-mailerlite-sync) is
+        not receiving current member data.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref MemberDataFunction
+      Statistic: Sum
+      Period: !Ref ErrorAlarmPeriodSeconds
+      EvaluationPeriods: !Ref ErrorAlarmEvaluationPeriods
+      DatapointsToAlarm: !Ref ErrorAlarmDatapointsToAlarm
+      Threshold: !Ref ErrorAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref AlarmTopicArn
+      OKActions:
+        - !Ref AlarmTopicArn
+
+Outputs:
+  MemberDataFunctionArn:
+    Description: ARN of the lodge104-memberdata Lambda function
+    Value: !GetAtt MemberDataFunction.Arn
+
+  MemberDataRoleArn:
+    Description: ARN of the Lambda execution role
+    Value: !GetAtt MemberDataRole.Arn
+
+  MemberDataTableArn:
+    Description: ARN of the lodge104-member_data DynamoDB table
+    Value: !GetAtt MemberDataTable.Arn
+
+  MemberDataTableStreamArn:
+    Description: ARN of the lodge104-member_data DynamoDB stream, consumed by the lodge104-mailerlite-sync pipeline
+    Value: !GetAtt MemberDataTable.StreamArn
+
+  MemberDataErrorAlarmArn:
+    Description: ARN of the CloudWatch alarm monitoring MemberDataFunction invocation errors
+    Value: !GetAtt MemberDataErrorAlarm.Arn
+
+  AlarmTopicArn:
+    Description: ARN of the SNS topic that receives alarm notifications
+    Value: !Ref AlarmTopicArn

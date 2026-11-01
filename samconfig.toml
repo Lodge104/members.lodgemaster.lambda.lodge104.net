@@ -1,0 +1,17 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "lodge104-memberdata"
+region = "us-east-1"
+capabilities = "CAPABILITY_NAMED_IAM"
+s3_bucket = "aws-sam-cli-managed-prod-pipeline--artifactsbucket-ykipdbx6uu8g"
+confirm_changeset = true
+fail_on_empty_changeset = false
+
+[pipeline.deploy.parameters]
+stack_name = "lodge104-memberdata-pipeline"
+region = "us-east-1"
+capabilities = "CAPABILITY_NAMED_IAM"
+template_file = "codepipeline.yaml"
+confirm_changeset = true
+fail_on_empty_changeset = false

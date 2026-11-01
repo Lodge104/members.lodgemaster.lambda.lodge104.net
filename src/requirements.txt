@@ -1,0 +1,3 @@
+# lodge104-memberdata Lambda handler. Deliberately has no listed
+# dependencies: boto3 and its vendored urllib3 are provided by the Lambda
+# Python runtime, so nothing needs to be installed/packaged here.
