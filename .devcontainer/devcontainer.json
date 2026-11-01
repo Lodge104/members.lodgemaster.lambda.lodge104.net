@@ -1,5 +1,5 @@
 {
-  "image": "mcr.microsoft.com/devcontainers/python",
+  "image": "mcr.microsoft.com/devcontainers/universal:linux",
   "features": {
     "ghcr.io/devcontainers/features/aws-cli:1": {},
     "ghcr.io/flexwie/devcontainer-features/op:1": {},
