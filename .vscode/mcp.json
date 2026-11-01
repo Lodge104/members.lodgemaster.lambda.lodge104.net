@@ -1,0 +1,17 @@
+{
+  "servers": {
+    "aws-mcp": {
+      "command": "uvx",
+      "args": [
+        "mcp-proxy-for-aws-cli==1.7.0",
+        "https://aws-mcp.us-east-1.api.aws/mcp",
+        "--metadata", "AWS_REGION=us-east-1"
+      ]
+    },
+    "mailerlite": {
+      "type": "http",
+      "url": "https://mcp.mailerlite.com/mcp",
+      "gallery": false
+    }
+  }
+}

@@ -5,7 +5,9 @@
     "ghcr.io/flexwie/devcontainer-features/op:1": {},
     "ghcr.io/lodge104/devcontainer.features/aws-sam-cli:latest": {},
     "ghcr.io/devcontainers-extra/features/uv:1": {},
-    "ghcr.io/devcontainers/features/docker-in-docker:4": {},
+    "ghcr.io/devcontainers/features/docker-in-docker:4": {
+      "moby": false
+    },
     "ghcr.io/devcontainers/features/git-lfs:1": {},
     "ghcr.io/devcontainers/features/github-cli:1": {}
   },
