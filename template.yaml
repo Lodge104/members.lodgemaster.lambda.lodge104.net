@@ -38,7 +38,7 @@ Parameters:
 
   LodgeMasterBaseUrl:
     Type: String
-    Default: "https://lodgemaster-client.oa-bsa.org"
+    Default: "https://lodgemaster-client.oa-scouting.org"
     Description: Base URL of the LodgeMaster portal queried for member data.
 
   ScheduleExpression:
