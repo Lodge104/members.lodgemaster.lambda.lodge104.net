@@ -69,77 +69,102 @@ _http = urllib3.PoolManager()
 _dynamodb = boto3.resource("dynamodb")
 _dynamodb_client = boto3.client("dynamodb")
 
-# Populated lazily on first invocation of each execution environment and
-# reused across warm invocations; never logged (it contains live session
-# credentials).
-_cached_lodgemaster_headers = None
+# Sent on every LodgeMaster request. Without it the portal answers an
+# unauthenticated/unrecognised request with a 302 to its login page (which
+# bounces through id.oa-scouting.org until urllib3 gives up with "too many
+# redirects"); with it, the API returns a plain 401-style JSON body instead.
+XHR_HEADERS = {"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"}
 
 
-def _build_lodgemaster_headers():
-    """Builds the Cookie/X-Xsrf-Token headers from the session cookies
-    lodge104-lodgemaster-scrapper maintains in KEYS_TABLE_NAME.
+def _load_session_cookies():
+    """Returns {name: value} for every cookie lodge104-lodgemaster-scrapper
+    has stored in KEYS_TABLE_NAME.
 
-    Forwards every item in the table as a cookie, rather than a fixed
-    allow-list of names: the portal's OpenID Connect identity-server login
-    flow issues several cookies that must all be present together for the
-    session to validate (e.g. OA.Portal.Auth plus its OA.Portal.AuthC1/C2
-    chunks, and an .AspNetCore.Antiforgery.* cookie whose name suffix can
-    change per deployment), so a hardcoded subset silently breaks whenever
-    that set changes upstream. lodge104-lodgemaster-scrapper applies its
-    own COOKIE_NAMES allow-list (if any) before writing to this table, so
-    there's no need to filter again here.
+    Forwards every item rather than a fixed allow-list: the portal's OpenID
+    Connect login flow issues several cookies that must all be present
+    together (OA.Portal.Auth plus its OA.Portal.AuthC1/C2 chunks, an
+    .AspNetCore.Antiforgery.* cookie with a per-deployment suffix, etc.).
 
-    Cached per execution environment: a cold start scans the table once;
-    later warm invocations reuse the result. Because the cache is only
-    cleared by a fresh cold start, a cookie rotation is not picked up by an
-    already-warm environment until it is recycled.
+    Read fresh on every invocation (never cached across warm starts): the
+    scrapper rewrites these hourly, and a stale copy is just a dead session.
     """
-    global _cached_lodgemaster_headers
-    if _cached_lodgemaster_headers is not None:
-        return _cached_lodgemaster_headers
-
-    cookie_pairs = []
-    xsrf_token_value = None
+    cookies = {}
     paginator = _dynamodb_client.get_paginator("scan")
     for page in paginator.paginate(TableName=KEYS_TABLE_NAME):
         for item in page.get("Items", []):
-            name = item["name"]["S"]
-            value = item["value"]["S"]
-            cookie_pairs.append(f"{name}={value}")
-            if name == XSRF_TOKEN_ITEM_NAME:
-                xsrf_token_value = value
+            cookies[item["name"]["S"]] = item["value"]["S"]
 
-    if not cookie_pairs:
+    if not cookies:
         raise RuntimeError(
             f"{KEYS_TABLE_NAME} is empty; has lodge104-lodgemaster-scrapper run yet?"
         )
-    if xsrf_token_value is None:
+    if XSRF_TOKEN_ITEM_NAME not in cookies:
         raise RuntimeError(
             f"'{XSRF_TOKEN_ITEM_NAME}' is missing from {KEYS_TABLE_NAME}; has "
             "lodge104-lodgemaster-scrapper run recently?"
         )
+    return cookies
 
-    _cached_lodgemaster_headers = {
-        "Cookie": "; ".join(cookie_pairs) + ";",
-        "X-Xsrf-Token": xsrf_token_value,
+
+def _request_headers(cookies):
+    return {
+        **XHR_HEADERS,
+        "Cookie": "; ".join(f"{k}={v}" for k, v in cookies.items()),
+        "X-Xsrf-Token": cookies[XSRF_TOKEN_ITEM_NAME],
     }
-    return _cached_lodgemaster_headers
+
+
+def _merge_set_cookies(cookies, response):
+    for header in response.headers.getlist("Set-Cookie"):
+        pair = header.split(";", 1)[0]
+        name, _, value = pair.partition("=")
+        if name and value:
+            cookies[name.strip()] = value.strip()
+
+
+def _open_api_session():
+    """Exchanges the scrapper's browser-login cookies for an authorised API
+    session and returns the headers to use for subsequent API calls.
+
+    The cookies in KEYS_TABLE_NAME alone are NOT enough: every /api and
+    /odata call returns "Authorization has been denied for this request"
+    until the portal SPA's startup call, POST /api/app/login, has been made.
+    That call validates the cookie jar and responds with refreshed
+    XSRF-TOKEN / OA.LM.Lodge.Auth cookies, which must replace the stored
+    ones for later requests.
+    """
+    cookies = _load_session_cookies()
+    response = _http.request(
+        "POST",
+        f"{LODGEMASTER_BASE_URL}/api/app/login",
+        headers={**_request_headers(cookies), "Content-Type": "application/json"},
+        body=b"",
+        redirect=False,
+    )
+    if response.status != 200:
+        raise RuntimeError(
+            f"LodgeMaster /api/app/login failed with status {response.status}; "
+            "the stored session cookies are probably expired"
+        )
+    _merge_set_cookies(cookies, response)
+    return _request_headers(cookies)
 
 
 def _fetch_members():
     """Fetches the current page of the LodgeMaster MemberGrid OData feed.
 
-    Returns the list of member records (each a DynamoDB-shaped dict, e.g.
-    {"BsaPersonId": {"N": "123"}, ...}) ready to write directly with
-    batch_writer().
+    Returns the list of member records ready to write with batch_writer().
     """
     url = f"{LODGEMASTER_BASE_URL}{MEMBER_GRID_PATH}"
-    response = _http.request("GET", url, headers=_build_lodgemaster_headers())
+    response = _http.request("GET", url, headers=_open_api_session(), redirect=False)
     if response.status != 200:
         raise RuntimeError(
             f"LodgeMaster MemberGrid request failed with status {response.status}"
         )
-    return json.loads(response.data)["value"]
+    body = json.loads(response.data)
+    if "value" not in body:
+        raise RuntimeError(f"LodgeMaster MemberGrid returned an error: {body}")
+    return body["value"]
 
 
 def lambda_handler(event, context):
