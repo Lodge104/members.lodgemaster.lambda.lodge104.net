@@ -167,7 +167,8 @@ def _fetch_members():
     return body["value"]
 
 
-def lambda_handler(event, context):
+def lambda_handler(_event, _context):
+    """Synchronize the LodgeMaster roster into DynamoDB."""
     table = _dynamodb.Table(MEMBER_DATA_TABLE_NAME)
     members = _fetch_members()
 
