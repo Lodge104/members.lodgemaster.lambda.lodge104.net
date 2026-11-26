@@ -43,7 +43,7 @@ Parameters:
 
   ScheduleExpression:
     Type: String
-    Default: rate(1 hour)
+    Default: rate(2 minutes)
     Description: >
       How often MemberDataFunction runs. This is a dedicated EventBridge
       rule owned by this stack, deliberately separate from the pre-existing
@@ -91,7 +91,7 @@ Globals:
   Function:
     Runtime: python3.12
     Architectures: [x86_64]
-    MemorySize: 3008
+    MemorySize: 1024
     Timeout: 900
     EphemeralStorage:
       Size: 512

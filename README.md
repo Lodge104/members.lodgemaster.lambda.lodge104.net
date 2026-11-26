@@ -196,9 +196,12 @@ stream are entirely outside this stack's concern.
 
 ### Resource sizing notes
 
-- `MemorySize` (3008 MB) and `Timeout` (900s, the Lambda maximum) are kept
-  at their live, pre-existing values: the handler parses a JSON response
-  covering the full ~10k-member roster and batch-writes it to DynamoDB.
+- `MemorySize` is 1024 MB (reduced from the live 3008 MB; observed peak usage
+  is ~150 MB) and `Timeout` is 900s (the Lambda maximum): the handler parses
+  a JSON response covering the full ~10k-member roster and batch-writes it
+  to DynamoDB.
+- The default schedule is `rate(2 minutes)` (the `ScheduleExpression`
+  parameter).
 - `EphemeralStorage` is reduced from the live console default of 3008 MB to
   the 512 MB service default, since the handler never writes to `/tmp`.
 - `Runtime` is bumped from the live `python3.10` to `python3.12`, matching
