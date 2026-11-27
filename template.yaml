@@ -43,7 +43,7 @@ Parameters:
 
   ScheduleExpression:
     Type: String
-    Default: rate(2 minutes)
+    Default: rate(1 hour)
     Description: >
       How often MemberDataFunction runs. This is a dedicated EventBridge
       rule owned by this stack, deliberately separate from the pre-existing
@@ -74,7 +74,7 @@ Parameters:
     Type: Number
     Description: >
       Length, in seconds, of each evaluation period used for the alarm.
-      Defaults to this function's hourly invocation cadence.
+      Defaults to a one-hour aggregate period.
     Default: 3600
 
   ErrorAlarmEvaluationPeriods:

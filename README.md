@@ -81,8 +81,8 @@ immediately with a message naming the problem -- which should also trip
 
 The stack defines a CloudWatch alarm, `MemberDataErrorAlarm`, that watches
 the `Errors` metric (`AWS/Lambda` namespace) for `MemberDataFunction`. By
-default it fires when 2 of the last 3 hourly invocation windows had 1 or
-more failed invocations
+default it sums errors over one-hour periods and fires when at least 1 error
+occurs in 2 of the last 3 periods
 (`ErrorAlarmThreshold`/`ErrorAlarmPeriodSeconds`/`ErrorAlarmEvaluationPeriods`/`ErrorAlarmDatapointsToAlarm`).
 It returns to `OK` once that many consecutive windows fall back under the
 threshold; a window with no error datapoint is treated as healthy. Both the
@@ -200,7 +200,7 @@ stream are entirely outside this stack's concern.
   is ~150 MB) and `Timeout` is 900s (the Lambda maximum): the handler parses
   a JSON response covering the full ~10k-member roster and batch-writes it
   to DynamoDB.
-- The default schedule is `rate(2 minutes)` (the `ScheduleExpression`
+- The default schedule is `rate(1 hour)` (the `ScheduleExpression`
   parameter).
 - `EphemeralStorage` is reduced from the live console default of 3008 MB to
   the 512 MB service default, since the handler never writes to `/tmp`.
