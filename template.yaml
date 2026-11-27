@@ -74,7 +74,7 @@ Parameters:
     Type: Number
     Description: >
       Length, in seconds, of each evaluation period used for the alarm.
-      Defaults to this function's hourly invocation cadence.
+      Defaults to a one-hour aggregate period.
     Default: 3600
 
   ErrorAlarmEvaluationPeriods:
@@ -91,7 +91,7 @@ Globals:
   Function:
     Runtime: python3.12
     Architectures: [x86_64]
-    MemorySize: 3008
+    MemorySize: 1024
     Timeout: 900
     EphemeralStorage:
       Size: 512
